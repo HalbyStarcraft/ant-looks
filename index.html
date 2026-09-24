@@ -152,7 +152,7 @@ function vecAnt(x,a,P,mode,shadow){
   const f=a.f, hs=a.soldier?1.35:1, ink=mode=='ink';
   const dark=ink?'#15100c':`rgb(${P.dark})`, body=ink?'#15100c':`rgb(${P.body})`;
   x.lineCap='round';
-  if(shadow){x.save();x.translate(0.12,0.16);x.fillStyle='rgba(0,0,0,.35)';x.filter='blur(1px)';x.beginPath();x.ellipse(-0.1,0,0.75,0.3,0,0,6.28);x.fill();x.restore()}
+  if(shadow){x.save();x.translate(0.12,0.16);x.fillStyle='rgba(0,0,0,.28)';x.beginPath();x.ellipse(-0.1,0,0.75,0.3,0,0,6.28);x.fill();x.restore()}
   x.strokeStyle=dark;x.lineWidth=0.045;
   for(let k=0;k<6;k++){const side=k<3?1:-1,m=k%3,ph=((m+(k<3?0:1))%2?Math.PI:0)+f*Math.PI/2,sw=Math.sin(ph)*0.14;
     x.beginPath();x.moveTo(0.16-m*0.08,0.05*side);x.lineTo(0.26-m*0.3+sw*0.5,0.3*side);x.lineTo(0.36-m*0.38+sw,0.52*side);x.stroke()}
@@ -213,6 +213,10 @@ function draw(st,t,follow){
 window.renderAt=(t,follow)=>{for(const st of tiles)draw(st,t,follow)};
 window.pickAnt=(t,x)=>{const A=ants(t);let b=0,bd=1e9;A.forEach((a,i)=>{if(i<48&&!a.soldier&&Math.abs(a.x-x)<bd){bd=Math.abs(a.x-x);b=i}});return b};
 let t0=performance.now();
-function frame(now){const t=(now-t0)/1000;for(const st of tiles)draw(st,t);requestAnimationFrame(frame)}
+// light on the machine: 30 fps, and only the tiles on screen
+const seen=new Set();const io=new IntersectionObserver(es=>es.forEach(e=>e.isIntersecting?seen.add(e.target):seen.delete(e.target)));
+tiles.forEach(st=>io.observe(st.cv.parentNode));
+let last=0;
+function frame(now){requestAnimationFrame(frame);if(now-last<33)return;last=now;const t=(now-t0)/1000;for(const st of tiles)if(seen.has(st.cv.parentNode))draw(st,t)}
 if(!location.search.includes('cap'))requestAnimationFrame(frame);
 </script>
