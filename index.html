@@ -1,0 +1,218 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ant Looks</title>
+<style>
+:root{--bg:#141110;--tile:#0c0a09}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg)}
+body{padding:16px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;max-width:1500px;margin:0 auto}
+@media (max-width:700px){.grid{grid-template-columns:1fr}}
+.t{position:relative;aspect-ratio:3/2;overflow:hidden;border-radius:8px;background:var(--tile);cursor:zoom-in}
+.t canvas{position:absolute;inset:0;width:100%;height:100%}
+.t.px canvas{image-rendering:pixelated}
+.t.tilt{perspective:620px}
+.t.tilt canvas{width:150%;height:150%;left:-25%;top:-25%;transform-origin:50% 50%}
+.t.big{grid-column:1/-1;cursor:zoom-out}
+.row{display:contents}
+</style>
+<div class="grid" id="g"></div>
+<script>
+// ---- the shared scene: a two-lane army-ant column crossing leaf litter, the same in every tile ----
+const WW = 640, WH = 420;
+function rng(seed){return function(){seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const R = rng(7);
+const laneY = s => 210 + 55*Math.sin(s/95) + 18*Math.sin(s/37);
+const laneD = s => 55/95*Math.cos(s/95) + 18/37*Math.cos(s/37);
+const scene = {leaves:[], twigs:[], pebbles:[], roots:[]};
+for (let i=0;i<70;i++) scene.leaves.push({x:R()*WW, y:R()*WH, l:14+R()*26, w:0.32+R()*0.2, a:R()*6.28, k:R(), chew:R()<0.4, v:R()});
+scene.big = {x:330, y:laneY(330)+8, l:95, w:0.42, a:0.2, k:0.2, chew:false, v:0.5};
+for (let i=0;i<22;i++) scene.twigs.push({x:R()*WW, y:R()*WH, l:20+R()*55, r:1+R()*1.6, a:R()*6.28, b:(R()-0.5)*0.5});
+for (let i=0;i<16;i++) scene.pebbles.push({x:R()*WW, y:R()*WH, r:2+R()*4, v:R()});
+for (let i=0;i<3;i++){const pts=[];let x=-40,y=R()*WH,a=(R()-0.5)*0.6;for(let k=0;k<30;k++){pts.push([x,y]);a+=(R()-0.5)*0.35;x+=26*Math.cos(a);y+=26*Math.sin(a)}scene.roots.push({pts,r:4+R()*4})}
+// the ants: outbound lane and homebound lane, soldiers flanking, never touching
+function ants(t){
+  const out=[], L=WW+220;
+  for (let lane=0;lane<2;lane++){
+    const dir=lane?-1:1, v=lane?21:26, n=48;
+    for (let i=0;i<n;i++){
+      const sp=i*(L/n)+((i*37)%7), s0=((sp+v*t)%L+L)%L-110, s=dir>0?s0:WW-s0;
+      const soldier=(i%11)==3, side=soldier?((i>>1)%2?1:-1)*14:0;
+      const off=(lane?5:-5)+side+1.3*Math.sin(t*1.7+i*2.1);
+      const d=laneD(s), nx=-d/Math.hypot(1,d), ny=1/Math.hypot(1,d);
+      out.push({x:s+nx*off, y:laneY(s)+ny*off, h:Math.atan2(d*dir,dir), f:Math.floor(Math.abs(s0)/2.3)%4, soldier, carry:lane==1&&!soldier&&(i%10)<7});
+    }
+  }
+  return out;
+}
+
+// ---- pixel painting helpers ----
+function paint(w,h,fn){const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d'),d=x.createImageData(w,h);
+  for(let j=0;j<h;j++)for(let i=0;i<w;i++){const p=fn(i,j);if(p){const k=(j*w+i)*4;d.data[k]=p[0];d.data[k+1]=p[1];d.data[k+2]=p[2];d.data[k+3]=p[3]??255}}
+  x.putImageData(d,0,0);return c}
+function outline(c,col){const x=c.getContext('2d'),d=x.getImageData(0,0,c.width,c.height),w=c.width,h=c.height,s=d.data.slice();
+  for(let j=0;j<h;j++)for(let i=0;i<w;i++){const k=(j*w+i)*4;if(s[k+3])continue;let n=0;for(const[a,b]of[[1,0],[-1,0],[0,1],[0,-1]]){const u=i+a,v=j+b;if(u>=0&&v>=0&&u<w&&v<h&&s[((v*w+u)*4)+3]>128)n++}
+    if(n){d.data[k]=col[0];d.data[k+1]=col[1];d.data[k+2]=col[2];d.data[k+3]=255}}
+  x.putImageData(d,0,0);return c}
+const seg=(px,py,ax,ay,bx,by)=>{const vx=bx-ax,vy=by-ay,t=Math.max(0,Math.min(1,((px-ax)*vx+(py-ay)*vy)/(vx*vx+vy*vy)));return Math.hypot(px-ax-vx*t,py-ay-vy*t)};
+const ell=(px,py,cx,cy,rx,ry)=>Math.hypot((px-cx)/rx,(py-cy)/ry);
+const mix=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t);
+const BAYER=[0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+
+// an ant, painted pixel by pixel, facing +x. S = body length in art pixels
+function antSprite(S, frame, P, soldier){
+  const W=Math.ceil(S*1.35), H=Math.ceil(S*1.0), hp=1/(S/2);
+  return paint(W,H,(i,j)=>{
+    const x=((i+0.5)-W/2)/(S/2), y=((j+0.5)-H/2)/(S/2);
+    const hs=soldier?1.35:1;
+    const gas=ell(x,y,-0.45,0,0.36,0.25), pet=ell(x,y,-0.08,0,0.08,0.06), tho=ell(x,y,0.1,0,0.2,0.11), head=ell(x,y,0.52+(hs-1)*0.12,0,0.19*hs,0.16*hs);
+    const body=Math.min(gas,pet,tho,head)<1;
+    let leg=9, lw=Math.max(hp*0.7,0.045);
+    for(let k=0;k<6;k++){const side=k<3?1:-1,m=k%3,ph=((m+(k<3?0:1))%2?Math.PI:0)+frame*Math.PI/2,sw=Math.sin(ph)*0.14;
+      const hx=0.16-m*0.08,kx=0.26-m*0.3+sw*0.5,fx=0.36-m*0.38+sw,ky=0.3*side,fy=0.52*side;
+      leg=Math.min(leg,seg(x,y,hx,0.05*side,kx,ky),seg(x,y,kx,ky,fx,fy))}
+    const ax=0.62+(hs-1)*0.2;
+    for(const e of[-1,1]){const w=Math.sin(frame*1.3+e)*0.05;leg=Math.min(leg,seg(x,y,ax,0.06*e,ax+0.18,0.2*e+w),seg(x,y,ax+0.18,0.2*e+w,ax+0.36,0.14*e+w*1.5))}
+    let jaw=9;if(soldier)for(const e of[-1,1])jaw=Math.min(jaw,seg(x,y,0.78,0.08*e,0.98,0.12*e),seg(x,y,0.98,0.12*e,1.05,0.02*e));
+    if(body){let c=P.body;if(soldier&&head<1)c=P.soldierHead;if(y<-0.04&&head>=1)c=mix(c,P.hi,0.5);if(head<1&&y<-0.05)c=mix(c,[255,255,255],0.15);return c}
+    if(jaw<Math.max(hp*0.7,0.05))return P.dark;
+    if(leg<lw)return P.dark;
+    return null});
+}
+// a leaf painted pixel by pixel
+function leafSprite(l,res,P){
+  const L=l.l*res, Wd=L*l.w, S=Math.ceil(L*2.2);
+  return paint(S,S,(i,j)=>{
+    const px=((i+0.5)-S/2), py=((j+0.5)-S/2), ca=Math.cos(-l.a), sa=Math.sin(-l.a);
+    const u=(px*ca-py*sa)/L, v=(px*sa+py*ca)/Wd;
+    let e=1-u*u-v*v*(1+0.6*u);
+    if(l.chew)e+=((Math.sin(u*23+l.v*9)*Math.sin(v*17))*0.18);
+    if(e<0)return null;
+    let c=l.k<0.45?mix(P.leafBrown[0],P.leafBrown[1],l.v):l.k<0.8?mix(P.leafTan[0],P.leafTan[1],l.v):mix(P.leafGreen[0],P.leafGreen[1],l.v);
+    const rib=Math.abs(v)<0.07&&u<0.95, vein=Math.abs(((u-Math.abs(v)*0.35)*5)%1)<0.12&&Math.abs(v)<0.85;
+    if(rib)c=mix(c,[255,240,200],0.25);else if(vein)c=mix(c,P.dirt[0],0.25);
+    if(e<0.12)c=mix(c,P.dirt[0],0.3);
+    return c});
+}
+// ---- style definitions ----
+const PAL={
+  earth:{body:[92,34,18],hi:[150,70,40],dark:[40,16,10],soldierHead:[222,186,120],crumb:[245,232,200],
+    dirt:[[46,32,22],[82,60,40]],leafBrown:[[112,64,32],[146,92,46]],leafTan:[[168,130,62],[204,168,86]],leafGreen:[[70,96,40],[104,128,52]],
+    twig:[[76,52,34],[120,88,58]],root:[[78,54,34],[118,86,56]],pebble:[[112,108,98],[160,154,140]]},
+  toy:{body:[196,40,24],hi:[255,110,70],dark:[38,12,16],soldierHead:[255,214,90],crumb:[255,255,230],
+    dirt:[[92,58,34],[136,94,56]],leafBrown:[[222,110,40],[250,146,52]],leafTan:[[240,196,64],[255,226,100]],leafGreen:[[70,170,60],[120,210,80]],
+    twig:[[128,80,44],[176,120,70]],root:[[118,76,44],[160,110,64]],pebble:[[150,160,176],[200,210,220]]},
+};
+// ground as a world-sized texture at `res` art pixels per unit
+function groundPixel(res,P,opt={}){
+  const w=Math.round(WW*res),h=Math.round(WH*res),r2=rng(3);
+  const noise=[];for(let k=0;k<w*h;k++)noise.push(r2());
+  let c=paint(w,h,(i,j)=>{const n=noise[j*w+i],b=0.5+0.5*Math.sin(i/(9*res))*Math.sin(j/(7*res));return mix(P.dirt[0],P.dirt[1],0.25*n+0.35*b)});
+  const x=c.getContext('2d');x.imageSmoothingEnabled=false;
+  for(const rt of scene.roots){const pts=rt.pts;for(let k=0;k<pts.length-1;k++){x.strokeStyle=`rgb(${mix(P.root[0],P.root[1],k%3/3)})`;x.lineWidth=Math.max(1,Math.round(rt.r*res));x.lineCap='round';x.beginPath();x.moveTo(pts[k][0]*res,pts[k][1]*res);x.lineTo(pts[k+1][0]*res,pts[k+1][1]*res);x.stroke()}}
+  const put=(sp,l)=>{if(opt.outline)outline(sp,P.dark);x.drawImage(sp,Math.round(l.x*res-sp.width/2),Math.round(l.y*res-sp.height/2))};
+  for(const l of scene.leaves)put(leafSprite(l,res,P),l);
+  for(const t of scene.twigs){const sp=paint(Math.ceil(t.l*res+6),Math.ceil(t.l*res+6),(i,j)=>{const S=t.l*res+6,px=i+0.5-S/2,py=j+0.5-S/2,ca=Math.cos(-t.a),sa=Math.sin(-t.a),u=px*ca-py*sa,v=px*sa+py*ca+Math.sin(u*0.15)*t.b*6;
+      if(Math.abs(u)>t.l*res/2||Math.abs(v)>Math.max(0.6,t.r*res))return null;return mix(P.twig[0],P.twig[1],v<0?0.8:0.2)});put(sp,t)}
+  for(const p of scene.pebbles){const sp=paint(Math.ceil(p.r*2*res+2),Math.ceil(p.r*2*res+2),(i,j)=>{const S=p.r*2*res+2,px=i+0.5-S/2,py=j+0.5-S/2,d=Math.hypot(px,py)/(p.r*res);if(d>1)return null;return mix(P.pebble[0],P.pebble[1],py<0?0.8:0.3)});put(sp,p)}
+  put(leafSprite(scene.big,res,P),scene.big);
+  if(opt.dither){const d=x.getImageData(0,0,w,h),ramp=opt.dither;for(let j=0;j<h;j++)for(let i=0;i<w;i++){const k=(j*w+i)*4,lum=(d.data[k]*0.3+d.data[k+1]*0.55+d.data[k+2]*0.15)/255;
+      const f=lum*(ramp.length-1)+(BAYER[(j%4)*4+i%4]/16-0.5)*0.9,q=ramp[Math.max(0,Math.min(ramp.length-1,Math.round(f)))];d.data[k]=q[0];d.data[k+1]=q[1];d.data[k+2]=q[2]}x.putImageData(d,0,0)}
+  return c;
+}
+function groundSmooth(res,P,mode){
+  const c=document.createElement('canvas');c.width=WW*res;c.height=WH*res;const x=c.getContext('2d');x.scale(res,res);
+  if(mode=='ink'){x.fillStyle='#efe6d2';x.fillRect(0,0,WW,WH);const r2=rng(5);x.fillStyle='rgba(90,70,50,.25)';for(let k=0;k<2500;k++)x.fillRect(r2()*WW,r2()*WH,0.6,0.6)}
+  else{const gr=x.createRadialGradient(WW/2,WH/2,50,WW/2,WH/2,420);gr.addColorStop(0,`rgb(${P.dirt[1]})`);gr.addColorStop(1,`rgb(${P.dirt[0]})`);x.fillStyle=gr;x.fillRect(0,0,WW,WH);
+    const r2=rng(5);for(let k=0;k<4000;k++){x.fillStyle=`rgba(${r2()<0.5?'20,12,6':'150,120,90'},${0.15+r2()*0.2})`;x.beginPath();x.arc(r2()*WW,r2()*WH,0.3+r2()*1.2,0,6.28);x.fill()}}
+  const shadow=mode=='painted';
+  for(const rt of scene.roots){x.lineCap='round';x.lineJoin='round';
+    if(shadow){x.strokeStyle='rgba(0,0,0,.35)';x.lineWidth=rt.r+2;x.beginPath();rt.pts.forEach((p,k)=>k?x.lineTo(p[0]+2,p[1]+3):x.moveTo(p[0]+2,p[1]+3));x.stroke()}
+    x.strokeStyle=mode=='ink'?'#3a2c20':`rgb(${P.root[0]})`;x.lineWidth=mode=='ink'?1.2:rt.r;x.beginPath();rt.pts.forEach((p,k)=>k?x.lineTo(p[0],p[1]):x.moveTo(p[0],p[1]));x.stroke();
+    if(mode!='ink'){x.strokeStyle=`rgba(${P.root[1]},.6)`;x.lineWidth=rt.r*0.35;x.beginPath();rt.pts.forEach((p,k)=>k?x.lineTo(p[0]-rt.r*0.2,p[1]-rt.r*0.2):x.moveTo(p[0],p[1]));x.stroke()}}
+  const leaf=l=>{x.save();x.translate(l.x,l.y);x.rotate(l.a);const L=l.l,W=L*l.w;
+    const path=()=>{x.beginPath();x.moveTo(-L,0);x.bezierCurveTo(-L*0.4,-W*1.35,L*0.5,-W*1.1,L,0);x.bezierCurveTo(L*0.5,W*1.1,-L*0.4,W*1.35,-L,0)};
+    if(shadow){x.save();x.translate(3,4);path();x.fillStyle='rgba(0,0,0,.35)';x.filter='blur(3px)';x.fill();x.restore()}
+    path();
+    if(mode=='ink'){x.fillStyle='rgba(255,250,240,.6)';x.fill();x.strokeStyle='#3a2c20';x.lineWidth=1;x.stroke()}
+    else{const cc=l.k<0.45?P.leafBrown:l.k<0.8?P.leafTan:P.leafGreen,g=x.createLinearGradient(0,-W,0,W);g.addColorStop(0,`rgb(${mix(cc[1],[255,255,255],shadow?0.12:0)})`);g.addColorStop(1,`rgb(${cc[0]})`);x.fillStyle=g;x.fill()}
+    x.strokeStyle=mode=='ink'?'#3a2c20':'rgba(255,240,200,.35)';x.lineWidth=mode=='ink'?0.8:1;x.beginPath();x.moveTo(-L,0);x.lineTo(L*0.95,0);x.stroke();
+    x.lineWidth=0.6;x.strokeStyle=mode=='ink'?'rgba(58,44,32,.7)':'rgba(40,24,10,.25)';for(let k=-3;k<=3;k++){if(!k)continue;const u=k/4*L;x.beginPath();x.moveTo(u,0);x.quadraticCurveTo(u+W*0.5,-W*0.4,u+W*0.7,-W*0.75);x.moveTo(u,0);x.quadraticCurveTo(u+W*0.5,W*0.4,u+W*0.7,W*0.75);x.stroke()}
+    x.restore()};
+  scene.leaves.forEach(leaf);
+  for(const t of scene.twigs){x.save();x.translate(t.x,t.y);x.rotate(t.a);if(shadow){x.strokeStyle='rgba(0,0,0,.35)';x.lineWidth=t.r*2;x.lineCap='round';x.beginPath();x.moveTo(-t.l/2+2,3);x.quadraticCurveTo(2,3+t.b*20,t.l/2+2,3);x.stroke()}
+    x.strokeStyle=mode=='ink'?'#3a2c20':`rgb(${P.twig[0]})`;x.lineWidth=mode=='ink'?1.3:t.r*2;x.lineCap='round';x.beginPath();x.moveTo(-t.l/2,0);x.quadraticCurveTo(0,t.b*20,t.l/2,0);x.stroke();x.restore()}
+  for(const p of scene.pebbles){x.beginPath();x.arc(p.x,p.y,p.r,0,6.28);if(mode=='ink'){x.strokeStyle='#3a2c20';x.lineWidth=0.8;x.stroke()}else{const g=x.createRadialGradient(p.x-p.r*0.4,p.y-p.r*0.4,0,p.x,p.y,p.r);g.addColorStop(0,`rgb(${P.pebble[1]})`);g.addColorStop(1,`rgb(${P.pebble[0]})`);x.fillStyle=g;x.fill()}}
+  leaf(scene.big);
+  return c;
+}
+// vector ant for the smooth styles, facing +x, body length 1
+function vecAnt(x,a,P,mode,shadow){
+  const f=a.f, hs=a.soldier?1.35:1, ink=mode=='ink';
+  const dark=ink?'#15100c':`rgb(${P.dark})`, body=ink?'#15100c':`rgb(${P.body})`;
+  x.lineCap='round';
+  if(shadow){x.save();x.translate(0.12,0.16);x.fillStyle='rgba(0,0,0,.35)';x.filter='blur(1px)';x.beginPath();x.ellipse(-0.1,0,0.75,0.3,0,0,6.28);x.fill();x.restore()}
+  x.strokeStyle=dark;x.lineWidth=0.045;
+  for(let k=0;k<6;k++){const side=k<3?1:-1,m=k%3,ph=((m+(k<3?0:1))%2?Math.PI:0)+f*Math.PI/2,sw=Math.sin(ph)*0.14;
+    x.beginPath();x.moveTo(0.16-m*0.08,0.05*side);x.lineTo(0.26-m*0.3+sw*0.5,0.3*side);x.lineTo(0.36-m*0.38+sw,0.52*side);x.stroke()}
+  const ax=0.62+(hs-1)*0.2;for(const e of[-1,1]){const w=Math.sin(f*1.3+e)*0.05;x.beginPath();x.moveTo(ax,0.06*e);x.lineTo(ax+0.18,0.2*e+w);x.lineTo(ax+0.36,0.14*e+w*1.5);x.stroke()}
+  const blob=(cx,rx,ry,col)=>{x.fillStyle=col;x.beginPath();x.ellipse(cx,0,rx,ry,0,0,6.28);x.fill()};
+  const gl=(cx,rx,ry)=>{if(ink)return;const g=x.createRadialGradient(cx-rx*0.3,-ry*0.4,0,cx,0,rx);g.addColorStop(0,`rgb(${P.hi})`);g.addColorStop(1,body);return g};
+  blob(-0.45,0.36,0.25,gl(-0.45,0.36,0.25)||body);blob(-0.08,0.08,0.06,body);blob(0.1,0.2,0.11,gl(0.1,0.2,0.11)||body);
+  blob(0.52+(hs-1)*0.12,0.19*hs,0.16*hs,a.soldier&&!ink?`rgb(${P.soldierHead})`:(gl(0.52,0.19,0.16)||body));
+  if(a.soldier){x.lineWidth=0.06;for(const e of[-1,1]){x.beginPath();x.moveTo(0.78,0.08*e);x.quadraticCurveTo(1.02,0.16*e,1.04,0.0);x.stroke()}}
+  if(a.carry){x.fillStyle=ink?'#efe6d2':`rgb(${P.crumb})`;x.beginPath();x.ellipse(0.9,0,0.22,0.16,0.3,0,6.28);x.fill();if(ink){x.strokeStyle=dark;x.lineWidth=0.04;x.stroke()}}
+}
+// ---- tiles ----
+const STY=[];
+const pixelStyle=(res,P,opt={})=>({kind:'px',res,P,opt});
+const smoothStyle=(mode,P)=>({kind:'sm',mode,P});
+// row 1: pixel art at three sizes
+STY.push(pixelStyle(0.8,PAL.earth), pixelStyle(1.25,PAL.earth), pixelStyle(1.9,PAL.earth));
+// row 2: pixel treatments
+STY.push(pixelStyle(1.25,PAL.earth,{outline:true}), pixelStyle(1.25,PAL.earth,{dither:[[26,18,14],[70,44,28],[122,84,48],[178,140,80],[226,204,150]]}), pixelStyle(1.25,PAL.toy,{outline:true}));
+// row 3: smooth
+STY.push(smoothStyle('clean',PAL.earth), smoothStyle('painted',PAL.earth), smoothStyle('ink',PAL.earth));
+// row 4: seen from other angles
+STY.push(Object.assign(pixelStyle(1.25,PAL.earth,{outline:true}),{tilt:48}), Object.assign(smoothStyle('painted',PAL.earth),{tilt:48}), Object.assign(smoothStyle('painted',PAL.earth),{tilt:66,dof:true}));
+
+const g=document.getElementById('g'), tiles=[];
+STY.forEach((st,idx)=>{
+  const d=document.createElement('div');d.className='t'+(st.kind=='px'?' px':'')+(st.tilt?' tilt':'');
+  const cv=document.createElement('canvas');cv.width=720;cv.height=480;d.appendChild(cv);g.appendChild(d);
+  d.onclick=()=>{d.classList.toggle('big')};
+  if(st.dof){const f=document.createElement('canvas');f.width=720;f.height=480;f.style.filter='blur(3px)';f.style.maskImage=f.style.webkitMaskImage='linear-gradient(to bottom,#000 0%,transparent 38%,transparent 62%,#000 100%)';d.appendChild(f);st.fog=f}
+  st.cv=cv;st.ph=idx*2.3;
+  if(st.kind=='px'){st.ground=groundPixel(st.res,st.P,st.opt);st.spr={};
+    for(const sol of[0,1]){const S=Math.round((sol?13:9)*st.res);st.spr[sol]=[0,1,2,3].map(f=>{const c=antSprite(Math.max(5,S),f,st.P,sol);return st.opt.outline?outline(c,[18,10,8]):c})}}
+  else st.ground=groundSmooth(3,st.P,st.mode);
+  tiles.push(st);
+});
+function draw(st,t,follow){
+  const cv=st.cv,x=cv.getContext('2d'),T=t+st.ph;
+  let zoom=1.3+2.6*(0.5-0.5*Math.cos(T*0.35)), rot=st.tilt?0:T*0.06;
+  let cx=330+60*Math.sin(T*0.13), cy=laneY(cx);
+  if(follow){const a=ants(t)[follow.i];cx=a.x;cy=a.y;zoom=follow.zoom;rot=0}
+  x.setTransform(1,0,0,1,0,0);x.fillStyle='#000';x.fillRect(0,0,cv.width,cv.height);
+  x.imageSmoothingEnabled=st.kind!='px';
+  x.translate(cv.width/2,cv.height/2);x.rotate(rot);x.scale(zoom,zoom);x.translate(-cx,-cy);
+  x.drawImage(st.ground,0,0,WW,WH);
+  const A=ants(t);
+  for(const a of A){
+    if(st.kind=='px'){const sp=st.spr[a.soldier?1:0][a.f],r=st.res;x.save();x.translate(a.x,a.y);x.rotate(a.h);
+      x.drawImage(sp,-sp.width/2/r,-sp.height/2/r,sp.width/r,sp.height/r);
+      if(a.carry){x.fillStyle=`rgb(${st.P.crumb})`;const s=Math.max(1/r,2.2);x.fillRect(5.2,-s/2,s*1.2,s)}
+      x.restore()}
+    else{x.save();x.translate(a.x,a.y);x.rotate(a.h);const L=a.soldier?13:9;x.scale(L,L);vecAnt(x,a,st.P,st.mode,st.mode=='painted');x.restore()}
+  }
+  if(st.tilt)cv.style.transform=`rotateX(${st.tilt}deg) rotateZ(${follow?-20:T*6%360}deg) scale(1)`;
+  if(st.fog){st.fog.style.transform=cv.style.transform;st.fog.style.width=cv.style.width;const f=st.fog,fx=f.getContext('2d');fx.clearRect(0,0,f.width,f.height);fx.drawImage(cv,0,0);f.className='';f.style.position='absolute';f.style.width='150%';f.style.height='150%';f.style.left='-25%';f.style.top='-25%';f.style.transformOrigin='50% 50%'}
+}
+// ?cap: frozen, for recording. renderAt(t, follow) draws every tile at time t, riding ant `follow.i`
+window.renderAt=(t,follow)=>{for(const st of tiles)draw(st,t,follow)};
+window.pickAnt=(t,x)=>{const A=ants(t);let b=0,bd=1e9;A.forEach((a,i)=>{if(i<48&&!a.soldier&&Math.abs(a.x-x)<bd){bd=Math.abs(a.x-x);b=i}});return b};
+let t0=performance.now();
+function frame(now){const t=(now-t0)/1000;for(const st of tiles)draw(st,t);requestAnimationFrame(frame)}
+if(!location.search.includes('cap'))requestAnimationFrame(frame);
+</script>
